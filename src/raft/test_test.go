@@ -486,7 +486,7 @@ func TestRejoin2B(t *testing.T) {
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
-
+	fmt.Printf("dc %d\n", leader1)
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
@@ -494,7 +494,7 @@ func TestRejoin2B(t *testing.T) {
 
 	// new leader commits, also for index=2
 	cfg.one(103, 2, true)
-
+	fmt.Println("passhere")
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
@@ -503,12 +503,12 @@ func TestRejoin2B(t *testing.T) {
 	cfg.connect(leader1)
 
 	cfg.one(104, 2, true)
-
+	fmt.Println("passhere2")
 	// all together now
 	cfg.connect(leader2)
 
 	cfg.one(105, servers, true)
-
+	fmt.Println("passhere3")
 	cfg.end()
 }
 
@@ -546,9 +546,10 @@ func TestBackup2B(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
-
+	fmt.Println("passhere")
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
+	fmt.Println("passhere2")
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
