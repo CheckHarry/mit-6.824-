@@ -497,6 +497,7 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) StartElection() {
 	rf.mu.Lock()
 	rf.ConvertTerm(rf.GeneralState.CurrentTerm+1, Candidate)
+	rf.prettyprint("start election")
 	wg := sync.WaitGroup{}
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
@@ -553,6 +554,7 @@ func (rf *Raft) HandleVote() {
 			rf.VoteHandler.count++
 		}
 		rf.persist()
+		rf.prettyprint(fmt.Sprintf("no have %d ballot , voting queue : %v", rf.VoteHandler.count, rf.VoteQueue))
 		rf.mu.Unlock()
 		rf.Votemu.Unlock()
 		if rf.VoteHandler.count >= len(rf.peers)/2+1 {
