@@ -20,13 +20,16 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -77,7 +80,6 @@ var name_mapping = map[int]string{
 type voteinfo struct {
 	VotedFor  int64
 	VotedTerm int64
-	JustVote  bool
 }
 
 type generalServerState struct {
@@ -131,8 +133,8 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// Persistent state
-	GeneralState *generalServerState
-	VoteInfo     *voteinfo
+	GeneralState generalServerState
+	VoteInfo     voteinfo
 	VoteQueue    []ballot
 	Votemu       sync.Mutex
 
@@ -172,12 +174,14 @@ func (rf *Raft) Vote(CandidateTerm int64, CandidateID int64) bool {
 		rf.VoteInfo.VotedFor = CandidateID
 		rf.VoteInfo.VotedTerm = CandidateTerm
 		return true
+	} else if CandidateTerm == rf.VoteInfo.VotedTerm && CandidateID == rf.VoteInfo.VotedFor {
+		return true
 	}
 	return false
 }
 
 func (rf *Raft) ResetElectionTimer() {
-	rf.PreviousPingTime = time.Now().Add(time.Duration(300+rand.Int31n(350)) * time.Millisecond).UnixMilli()
+	rf.PreviousPingTime = time.Now().Add(time.Duration(600+rand.Int31n(650)) * time.Millisecond).UnixMilli()
 }
 
 // return currentTerm and whether this server
@@ -209,6 +213,14 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	writer := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(writer)
+	encoder.Encode(rf.GeneralState)
+	encoder.Encode(rf.VoteInfo)
+	encoder.Encode(rf.Log)
+	data := writer.Bytes()
+	rf.persister.SaveRaftState(data)
+	rf.prettyprint("presist")
 }
 
 //
@@ -231,6 +243,24 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	rf.prettyprint("reboot")
+	reader := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(reader)
+	var GeneralState generalServerState
+	var VoteInfo voteinfo
+	var Log []raftLog
+	if decoder.Decode(&GeneralState) != nil ||
+		decoder.Decode(&VoteInfo) != nil ||
+		decoder.Decode(&Log) != nil {
+		fmt.Printf("%v , %v , %v", GeneralState, VoteInfo, Log)
+	} else {
+		//fmt.Printf("%v , %v , %v", GeneralState, VoteInfo, Log)
+		rf.GeneralState = GeneralState
+		rf.VoteInfo = VoteInfo
+		rf.Log = Log
+		//fmt.Printf("%v , %v , %v", rf.GeneralState, rf.VoteInfo, rf.Log)
+	}
+
 }
 
 //
@@ -298,6 +328,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		} else {
 			reply.IsGrantVote = false
 		}
+		rf.persist()
 	}
 
 }
@@ -357,39 +388,45 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.GeneralState.CurrentTerm
-	if args.LeaderTerm >= rf.GeneralState.CurrentTerm {
-		if args.LeaderTerm > rf.GeneralState.CurrentTerm {
-			rf.ConvertTerm(args.LeaderTerm, Follower)
-		}
-		rf.ResetElectionTimer()
-		rf.prettyprint(fmt.Sprintf("get append LeaderCommit %d , Log : %v", args.LeaderCommitIndex, rf.Log))
-		rf.CommitIndex = min(args.LeaderCommitIndex, int64(len(rf.Log)-1))
-		// handle append entries here
-		if args.PrevLogIndex == -1 {
-			return
-		}
-		rf.prettyprint(fmt.Sprintf("get append %v , log index : %d, term %d", args, len(rf.Log)-1, rf.Log[len(rf.Log)-1].Term))
 
-		if len(rf.Log)-1 >= int(args.PrevLogIndex) && rf.Log[args.PrevLogIndex].Term == args.PrevLogTerm {
-			rf.prettyprint(fmt.Sprint("get append"))
-			if len(rf.Log)-1 == int(args.PrevLogIndex) {
-				rf.Log = append(rf.Log, args.Entry)
-			}
-			reply.Success = true
-			rf.prettyprint(fmt.Sprintf("Change commit index from %d to %d", rf.CommitIndex, min(args.LeaderCommitIndex, int64(len(rf.Log)-1))))
-			rf.CommitIndex = min(args.LeaderCommitIndex, int64(len(rf.Log)-1))
-			rf.prettyprint(fmt.Sprintf("Now the Log is %v", rf.Log))
-		} else {
-			reply.Success = false
-			if len(rf.Log)-1 >= int(args.PrevLogIndex) {
-				rf.prettyprint(fmt.Sprintf("Now the Log is %v before remove , args : %v", rf.Log, args))
-				rf.Log = rf.Log[:args.PrevLogIndex]
-
-			}
-		}
-	} else {
+	if args.LeaderTerm < rf.GeneralState.CurrentTerm {
 		reply.Success = false
+		return
 	}
+
+	rf.ResetElectionTimer()
+
+	if args.LeaderTerm > rf.GeneralState.CurrentTerm {
+		rf.ConvertTerm(args.LeaderTerm, Follower)
+		rf.persist()
+	}
+
+	rf.prettyprint(fmt.Sprintf("get append %v , LeaderCommit %d , log index : %d, term %d , Log : %v", args, args.LeaderCommitIndex, len(rf.Log)-1, rf.Log[len(rf.Log)-1].Term, rf.Log))
+	if !(len(rf.Log)-1 >= int(args.PrevLogIndex) && rf.Log[args.PrevLogIndex].Term == args.PrevLogTerm) || len(rf.Log)-1 < int(args.PrevLogIndex) {
+		reply.Success = false
+		return
+	}
+	rf.prettyprint(fmt.Sprintf("Before insert, the Log is %v", rf.Log))
+	if args.Entry.Term != -1 {
+		if len(rf.Log)-1 >= int(args.PrevLogIndex)+1 && rf.Log[int(args.PrevLogIndex)+1].Term != args.Entry.Term {
+			rf.Log = rf.Log[:args.PrevLogIndex+1]
+		}
+		if len(rf.Log)-1 == int(args.PrevLogIndex) {
+			rf.Log = append(rf.Log, args.Entry)
+		}
+
+	}
+
+	if args.LeaderCommitIndex > rf.CommitIndex {
+		rf.prettyprint(fmt.Sprintf("Change commit index from %d to %d", rf.CommitIndex, min(args.LeaderCommitIndex, int64(len(rf.Log)-1))))
+		rf.CommitIndex = min(args.LeaderCommitIndex, int64(len(rf.Log)-1))
+	}
+
+	rf.prettyprint(fmt.Sprintf("Now the Log is %v", rf.Log))
+
+	reply.Success = true
+	rf.persist()
+
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -414,19 +451,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
 
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if rf.GeneralState.Role != Leader {
-		isLeader = false
-	} else {
+	if rf.GeneralState.Role == Leader {
 		term = int(rf.GeneralState.CurrentTerm)
 		index = len(rf.Log)
-		rf.prettyprint(fmt.Sprintf("get cmd with term %d, index %d", term, index))
+		rf.prettyprint(fmt.Sprintf("get cmd with term %d, index %d , content %v", term, index, command))
 		rf.Log = append(rf.Log, raftLog{int64(term), command})
+		rf.persist()
+		isLeader = true
 		rf.prettyprint(fmt.Sprintf("now the Log is like %v", rf.Log))
 	}
 
@@ -492,6 +529,7 @@ func (rf *Raft) StartElection() {
 		}(i)
 	}
 	wg.Wait()
+	rf.persist()
 	rf.mu.Unlock()
 }
 
@@ -504,8 +542,8 @@ func (rf *Raft) HandleVote() {
 			continue
 		}
 		rf.mu.Lock()
-		rf.prettyprint(fmt.Sprintf("q :%v", rf.VoteQueue))
-		rf.mu.Unlock()
+		//rf.prettyprint(fmt.Sprintf("q :%v", rf.VoteQueue))
+
 		ballot := rf.VoteQueue[0]
 		rf.VoteQueue = rf.VoteQueue[1:]
 		if ballot.IsVote && ballot.Term > rf.VoteHandler.votingTerm {
@@ -514,11 +552,14 @@ func (rf *Raft) HandleVote() {
 		} else if ballot.IsVote && ballot.Term == rf.VoteInfo.VotedTerm {
 			rf.VoteHandler.count++
 		}
-
+		rf.persist()
+		rf.mu.Unlock()
 		rf.Votemu.Unlock()
 		if rf.VoteHandler.count >= len(rf.peers)/2+1 {
 			rf.mu.Lock()
+			rf.Votemu.Lock()
 			rf.prettyprint(fmt.Sprintf("elected as TERM %d Leader , get vote %d , queue len : %d , %v", rf.VoteHandler.votingTerm, rf.VoteHandler.count, len(rf.VoteQueue), rf.VoteQueue))
+			rf.Votemu.Unlock()
 			rf.VoteHandler.count = 0 // reset the count to avoid trigger again
 			rf.MatchIndex = make([]int64, len(rf.peers))
 			rf.NextIndex = make([]int64, len(rf.peers))
@@ -527,6 +568,7 @@ func (rf *Raft) HandleVote() {
 				rf.NextIndex[i] = int64(len(rf.Log))
 			}
 			rf.ConvertTerm(rf.VoteHandler.votingTerm, Leader)
+			rf.persist()
 			go rf.heartbeat()
 			rf.mu.Unlock()
 		}
@@ -548,7 +590,8 @@ func (rf *Raft) heartbeat() {
 			}
 			wg.Add(1)
 			go func(j int) {
-				args := AppendEntriesArgs{rf.GeneralState.CurrentTerm, int64(rf.me), -1, -1, raftLog{-1, nil}, rf.CommitIndex}
+				NextIndex := rf.NextIndex[j]
+				args := AppendEntriesArgs{rf.GeneralState.CurrentTerm, int64(rf.me), int64(NextIndex - 1), rf.Log[NextIndex-1].Term, raftLog{-1, nil}, rf.CommitIndex}
 				reply := AppendEntriesReply{-1, false}
 				wg.Done()
 				success := rf.sendAppendEntries(j, &args, &reply)
@@ -561,7 +604,7 @@ func (rf *Raft) heartbeat() {
 		}
 		wg.Wait()
 		rf.mu.Unlock()
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -579,6 +622,7 @@ func (rf *Raft) HandleMessage() {
 		rf.mu.Lock()
 		if message.term > rf.GeneralState.CurrentTerm {
 			rf.ConvertTerm(message.term, Follower)
+			rf.persist()
 			//go rf.CheckLeaderState()
 		} else {
 
@@ -594,7 +638,7 @@ func (rf *Raft) HandleMessage() {
 				}
 			}
 		}
-		rf.prettyprint(fmt.Sprintf("the match index array %v", rf.MatchIndex))
+		//rf.prettyprint(fmt.Sprintf("the match index array %v", rf.MatchIndex))
 		rf.mu.Unlock()
 	}
 }
@@ -609,10 +653,7 @@ func (rf *Raft) CheckLeaderState() {
 			continue
 		}
 		if time.Now().UnixMilli() > rf.PreviousPingTime {
-			//rf.prettyprint("convert to candidate")
-			rf.prettyprint(fmt.Sprintf("timer : %d ,reset timer", rf.PreviousPingTime))
 			rf.ResetElectionTimer()
-			rf.prettyprint(fmt.Sprintf("timer : %d", rf.PreviousPingTime))
 			go rf.StartElection()
 			rf.mu.Unlock()
 		} else {
@@ -632,7 +673,6 @@ func (rf *Raft) ApplyLog() {
 			to_apply.Command = rf.Log[rf.ApplyHandler.CurApplyCommitIndex].CMD
 			to_apply.CommandIndex = int(rf.ApplyHandler.CurApplyCommitIndex)
 			to_apply.CommandValid = true
-			//rf.prettyprint(fmt.Sprintf(" apply command with index %d , %v", rf.ApplyHandler.CurApplyCommitIndex, rf.Log[rf.ApplyHandler.CurApplyCommitIndex]))
 			rf.mu.Unlock()
 			rf.applych <- to_apply
 		} else {
@@ -682,7 +722,7 @@ func (rf *Raft) ReplicateLog() {
 						rf.Log[NextIndex],
 						rf.CommitIndex}
 					reply := AppendEntriesReply{-1, false}
-					//rf.prettyprint(fmt.Sprintf("Send AE with prevIndex and prevTerm %d , %d ", int64(NextIndex-1), rf.Log[NextIndex-1].Term))
+					rf.prettyprint(fmt.Sprintf("Send AE with prevIndex and prevTerm %d , %d ", int64(NextIndex-1), rf.Log[NextIndex-1].Term))
 					wg.Done()
 					success := rf.sendAppendEntries(j, &args, &reply)
 					if success {
@@ -693,20 +733,32 @@ func (rf *Raft) ReplicateLog() {
 				}(i)
 			}
 		}
-		//rf.prettyprint(fmt.Sprintf("Leader rf.CommitIndex %d , commit_map %v", rf.CommitIndex, commit_map))
-		// iterate through the commimt_map
-		for k, v := range commit_map {
-			if v >= len(rf.peers)/2+1 {
-				if rf.Log[k].Term == rf.GeneralState.CurrentTerm {
-					rf.CommitIndex = k
+		wg.Wait()
 
-				}
-			}
+		// iterate through the commimt_map
+		type pair struct {
+			k int64
+			v int
+		}
+		keys := make([]pair, 0)
+		for k, v := range commit_map {
+			keys = append(keys, pair{k, v})
 		}
 
-		wg.Wait()
+		sort.Slice(keys, func(i, j int) bool { return keys[i].k < keys[j].k })
+		rf.prettyprint(fmt.Sprintf("key %v", keys))
+		count := 0
+		for i := len(keys) - 1; i >= 0; i-- {
+			count += keys[i].v
+			if count >= len(rf.peers)/2+1 && rf.Log[keys[i].k].Term == rf.GeneralState.CurrentTerm {
+				rf.prettyprint(fmt.Sprintf("Leader rf.CommitIndex %d change to %d , commit_map %v", rf.CommitIndex, keys[i].k, commit_map))
+				rf.CommitIndex = keys[i].k
+				break
+			}
+		}
+		rf.prettyprint((fmt.Sprintf("Now the log is after count commit %v", rf.Log)))
 		rf.mu.Unlock()
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 
@@ -734,8 +786,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.applych = applyCh
 	// Your initialization code here (2A, 2B, 2C).
-	rf.GeneralState = &generalServerState{0, Follower}
-	rf.VoteInfo = &voteinfo{-1, -1, false}
+	rf.GeneralState = generalServerState{0, Follower}
+	rf.VoteInfo = voteinfo{-1, -1}
 	rf.LogIndex = 0
 	rf.Log = []raftLog{{-1, nil}} // 0 index is always -1 to prevent edge case
 	rf.CommitIndex = 0
@@ -743,8 +795,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.ResetElectionTimer()
 	rf.readPersist(persister.ReadRaftState())
-
+	if rf.GeneralState.Role == Leader {
+		rf.MatchIndex = make([]int64, len(rf.peers))
+		rf.NextIndex = make([]int64, len(rf.peers))
+		for i := 0; i < len(rf.peers); i++ {
+			rf.MatchIndex[i] = 0
+			rf.NextIndex[i] = int64(len(rf.Log))
+		}
+	}
 	// start ticker goroutine to start elections
+
 	go rf.HandleVote()
 	go rf.HandleMessage()
 	go rf.CheckLeaderState()
